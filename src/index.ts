@@ -132,7 +132,7 @@ class FactoryBuilder<T> extends Set<Specialisation<T>>{
         const errorMessage = TypeScript.factory.createTemplateExpression(
             TypeScript.factory.createTemplateHead(``),
             [
-                TypeScript.factory.createTemplateSpan(TypeScript.factory.createIdentifier(this.discriminatingProperty), TypeScript.factory.createTemplateTail(`is not a valid value for ${this.discriminatingProperty}`)),
+                TypeScript.factory.createTemplateSpan(TypeScript.factory.createIdentifier(this.discriminatingProperty), TypeScript.factory.createTemplateTail(` is not a valid value for ${this.discriminatingProperty}`)),
             ]);
         const checkForConstructorFound = TypeScript.factory.createIfStatement(
             TypeScript.factory.createPrefixUnaryExpression(TypeScript.SyntaxKind.ExclamationToken, TypeScript.factory.createIdentifier(`constr`)),
