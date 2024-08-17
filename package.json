@@ -1,16 +1,21 @@
 {
-  "name": "factorygenerator",
+  "name": "@djleehaha/factorygenerator",
   "version": "0.0.1",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "DJL",
-  "license": "none",
+  "license": "MIT",
   "description": "",
-  "devDependencies": {
+  "type": "module",
+  "dependencies": {
+    "@djleehaha/boxcomments": "^0.0.3",
+    "@types/node": "^22.4.0",
+    "chokidar": "^3.6.0",
+    "source-map-js": "^1.2.0",
     "typescript": "^5.5.4"
-  },
-  "type": "module"
+  }
 }
