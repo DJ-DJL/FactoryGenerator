@@ -1,0 +1,6 @@
+tests
+.vscode
+src/
+*.ts
+!*.d.ts
+!dist/
