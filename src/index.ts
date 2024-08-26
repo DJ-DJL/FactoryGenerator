@@ -240,6 +240,9 @@ class FactoryBuilder<T> extends Set<Specialisation<T>>{
         ], Number.MAX_SAFE_INTEGER);
     }
     private async *generateImports(uniqueNames: Map<Specialisation<T>, string>) {
+        const mappedFunctionLocation = await getMappedFunctionLocation(this.baseClass);
+        const fixedSrcFilename = mappedFunctionLocation.filename.replace(/.ts$/, '.js');
+        const importPath = Path.relative(Path.dirname(this.outFile), fixedSrcFilename);
         yield TypeScript.factory.createImportDeclaration(
             undefined,
             TypeScript.factory.createImportClause(
@@ -253,7 +256,7 @@ class FactoryBuilder<T> extends Set<Specialisation<T>>{
                     )
                 ])
             ),
-            TypeScript.factory.createStringLiteral(Path.relative(Path.dirname(this.outFile), (await getMappedFunctionLocation(this.baseClass)).filename.replace(/.ts$/, '.js'))));
+            TypeScript.factory.createStringLiteral(importPath));
         for await (const specialisation of this) { // .deDupe()) {
             // console.log(specialisation);
             if (!(this.discriminatingProperty in (specialisation.constr as any))) {
@@ -276,7 +279,7 @@ class FactoryBuilder<T> extends Set<Specialisation<T>>{
                         )
                     ])
                 ),
-                TypeScript.factory.createStringLiteral(Path.relative(Path.dirname(this.outFile), specialisation.srcFileName))
+                TypeScript.factory.createStringLiteral(Path.relative(Path.dirname(this.outFile), specialisation.srcFileName.replace('dist', 'src')))
             );
         }
     }
@@ -311,6 +314,10 @@ class FactoryBuilder<T> extends Set<Specialisation<T>>{
         return somethingWasDeleted;
     }
 }
+
+type runPropertyBag = {
+    ignorePaths: string[];
+};
 
 export default class FactoriesBuilder {
     static #factoryBuilders: Map<Function, FactoryBuilder<Function>> = new Map();
@@ -347,22 +354,25 @@ export default class FactoriesBuilder {
         }
     }
     static isRunning: boolean = false;
-    static async run(srcPath: string) {
+    static async run(srcPath: string, { ignorePaths }: runPropertyBag) {
         if (this.isRunning) {
             return;
         }
         this.isRunning = true;
 
         console.log(`Looking for src files in ${srcPath}`);
-        await FactoriesBuilder.scan(srcPath);
+        await FactoriesBuilder.scan(srcPath, ignorePaths);
         const watcher = Chokidar.watch(
             Path.resolve(srcPath),
             { persistent: true, ignoreInitial: true }
         );
         async function considerChangedFile(type: string, path: string) {
+            if (FactoriesBuilder.isPathIgnored(path, ignorePaths)) {
+                return;
+            };
             if (path && ['.js', '.mjs'].includes(Path.extname(path))) {
                 // console.log(`\x1B[34m ${type} \x1B[0m ${path}`);
-                for (const builder of await FactoriesBuilder.considerFile(path)) {
+                for (const builder of await FactoriesBuilder.considerFile(path, ignorePaths)) {
                     await builder.generate(`\x1B[34m${path}\x1B[0m was written to`);
                 }
             }
@@ -375,9 +385,21 @@ export default class FactoriesBuilder {
             await builder.generate(`Initial build`);
         }
 
-    }
 
-    static async considerFile(modulePath: string): Promise<Iterable<FactoryBuilder<Function>>> {
+
+    }
+    static isPathIgnored(path: string, ignorePaths: string[]): boolean {
+        for (const ignorePath of ignorePaths) {
+            // console.log('ignore?', Path.relative(Path.resolve(ignorePath), Path.resolve(path)), path, ignorePath);
+            if (!Path.relative(Path.resolve(ignorePath), Path.resolve(path)).startsWith('../')) {
+                // console.log(`ignoring file ${path}`);
+                return true;
+            }
+        }
+        return false;
+    }
+    static async considerFile(modulePath: string, ignoredPaths: string[]): Promise<Iterable<FactoryBuilder<Function>>> {
+
         const affectedBuilders = new Set<FactoryBuilder<Function>>();
         for (const builder of this.#factoryBuilders.values()) {
             if (builder.removeExistingFileReferences(modulePath)) {
@@ -385,16 +407,13 @@ export default class FactoriesBuilder {
             }
         }
         if (Path.resolve(modulePath) === Path.resolve(import.meta.filename)) {
-            // if (reason !== "initial") {
-            //     console.log(`\x1B[36m Ignoring change to ${modulePath} because it belongs to this module!`);
-            // }
             return []; // don't try to load this file!
         }
         if (this.#isFactoryBuilderOutputFile(modulePath)) {
-            // if (reason !== "initial") {
-            //     console.log(`\x1B[36m Ignoring change to ${modulePath} because it's an output file`);
-            // }
             return []; // don't try to load this file!
+        }
+        if (FactoriesBuilder.isPathIgnored(modulePath, ignoredPaths)) {
+            return [];
         }
         const module = await this.#loadModule(modulePath);
         if (!module) {
@@ -432,12 +451,13 @@ Possible causes:
         }
         return affectedBuilders.values();
     }
-    private static async scan(path: string) {
+    private static async scan(path: string, ignoredPaths: string[]) {
 
         const files = FS.readdirSync(path, { withFileTypes: true, recursive: true }).filter(f => f.isFile() && ['.js', '.mjs'].includes(Path.extname(f.name)));
         for (const file of files) {
+
             const modulePath = Path.join(file.parentPath, file.name);
-            await FactoriesBuilder.considerFile(modulePath);
+            await FactoriesBuilder.considerFile(modulePath, ignoredPaths);
         }
     }
 }
