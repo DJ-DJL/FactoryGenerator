@@ -3,80 +3,114 @@ import { SourceMapConsumer } from 'source-map-js';
 import FS from 'fs';
 import Path from 'path';
 
-const inspector = (new Inspector.Session());
-const parsedFiles = new Map<string, string>();
-inspector.connect();
-inspector.on('Debugger.scriptParsed', (result) => {
-    parsedFiles.set(result.params.scriptId, result.params.url); // TODO: Improve to utilise sourcemap?
-});
-inspector.post('Debugger.enable');
+const { parsedFiles, post } = initInspector();
 
+function initInspector() {
+    const inspector = (new Inspector.Session());
+    const parsedFiles = new Map<string, string>();
+    inspector.connect();
+    inspector.on('Debugger.scriptParsed', (result) => {
+        parsedFiles.set(result.params.scriptId, result.params.url);
+    });
+    inspector.post('Debugger.enable');
+    return { inspector, parsedFiles, post };
 
-export async function getMappedFunctionLocation(func: Function): Promise<{ filename: string, line: number, col: number }> {
+    function post(method: string, params?: object): Promise<object | undefined> {
+        return new Promise((r, x) => {
+            if (params) {
+                inspector.post(method, params, cb);
+            } else {
+                inspector.post(method, cb);
+            }
+            function cb(err: Error | null, result: object | undefined): void {
+                if (err) {
+                    return x(err);
+                }
+                r(result);
+            };
+        })
+    }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- This is actually supposed to work with any function. The function will not be invoked so we don't need any further type info.
+export async function getMappedFunctionLocation(func: Function): Promise<FunctionLocation> {
     const unmappedLocation = await getFunctionLocation(func);
-    let sourceMapFilename;
-    if (unmappedLocation.sourceMapURL) {
-        sourceMapFilename = unmappedLocation.sourceMapURL;
-    } else if (FS.existsSync(`${unmappedLocation.filename}.map`)) {
-        sourceMapFilename = `${unmappedLocation.filename}.map`;
-    } else {
-        // no sourcemap available
+    const sourceMapFilename = getSourceMapFilename(unmappedLocation);
+    if (!sourceMapFilename) {
         return unmappedLocation;
     }
     const consumer = await getSourceMapConsumer(sourceMapFilename);
-    const mapped = consumer.originalPositionFor({ line: unmappedLocation.line, column: unmappedLocation.col });
+    const mappedLocation = consumer.originalPositionFor({ line: unmappedLocation.line, column: unmappedLocation.col });
     return {
-        filename: Path.resolve(Path.dirname(unmappedLocation.filename), mapped.source),
-        line: mapped.line,
-        col: mapped.column
+        filename: Path.resolve(Path.dirname(unmappedLocation.filename), mappedLocation.source),
+        line: mappedLocation.line,
+        col: mappedLocation.column
     }
 }
+
+function getSourceMapFilename(unmappedLocation: FunctionLocationWithMap): string | null {
+    if (unmappedLocation.sourceMapURL) {
+        return unmappedLocation.sourceMapURL;
+    }
+    if (FS.existsSync(`${unmappedLocation.filename}.map`)) {
+        return `${unmappedLocation.filename}.map`;
+    }
+    return null; // no sourcemap available
+}
+
 export async function getSourceMapConsumer(sourceMapFilename: string) {
     const sourceMapContent = await FS.promises.readFile(sourceMapFilename, 'utf8');
     const consumer = new SourceMapConsumer(JSON.parse(sourceMapContent));
     return consumer;
 }
 
-export async function getFunctionLocation(func: Function): Promise<{ filename: string, line: number, col: number, sourceMapURL: string }> {
-    // console.log(func.name, func);
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- This is actually supposed to work with any function. The function will not be invoked so we don't need any further type info.
+export async function getFunctionLocation(func: Function): Promise<FunctionLocationWithMap> {
+    // unfortunately this will pollute the global, but we will clean it up before we return anything
     const globalPropName = getRandomPropName();
     (globalThis as any)[globalPropName] = func;
     try {
-        return await new Promise((r, x) => {
-            inspector.post(`Runtime.evaluate`, { expression: `global[${JSON.stringify(globalPropName)}]` }, (err, { result }) => {
-                if (err) {
-                    return x(err);
-                }
-                inspector.post(`Runtime.getProperties`, { objectId: result.objectId }, (err, result: any) => {
-                    if (err) {
-                        return x(err);
-                    }
-                    // console.log(result.internalProperties);
-                    const functionLocationProperty = result.internalProperties.find((prop: any) => prop.name === `[[FunctionLocation]]`);
-                    const functionLocation = functionLocationProperty.value.value;
-                    r({
-                        filename: new URL(parsedFiles.get(functionLocation.scriptId)!).pathname,
-                        line: functionLocation.lineNumber,
-                        col: functionLocation.columnNumber,
-                        sourceMapURL: functionLocation.sourceMapURL,
-                    });
-                });
-            });
-        });
+        const expression = `global[${JSON.stringify(globalPropName)}]`;
+        const { result: { objectId } } = await post(`Runtime.evaluate`, { expression }) as any;
+        const properties = await post(`Runtime.getProperties`, { objectId: objectId });
+        return getFunctionLocationFromRuntimeProperties(properties);
+
     } finally {
         delete (globalThis as any)[globalPropName]; // clean up after ourselves
     }
 }
 
+type FunctionLocation = {
+    filename: string;
+    line: number;
+    col: number;
+};
+
+type FunctionLocationWithMap = FunctionLocation & {
+    sourceMapURL: string;
+};
+
+function getFunctionLocationFromRuntimeProperties(result: any): FunctionLocationWithMap {
+    const functionLocationProperty = result.internalProperties.find((prop: any) => prop.name === `[[FunctionLocation]]`);
+    const functionLocation = functionLocationProperty.value.value;
+    const ret = {
+        filename: new URL(parsedFiles.get(functionLocation.scriptId)!).pathname,
+        line: functionLocation.lineNumber,
+        col: functionLocation.columnNumber,
+        sourceMapURL: functionLocation.sourceMapURL,
+    };
+    return ret;
+}
 
 export function getRandomPropName() {
-    const random8Chars = () => Math.floor(Math.random() * 2 ** 32).toString(16).padStart(8, '0');
-    const randomPropName = `____${random8Chars()}${random8Chars()}${random8Chars()}${random8Chars()}`;
+    // After a conversation with chatGPT we determined that the expected mean time between collisions is approx. 1.17 years using a high spec CPU in 2024 calling this function on every clock cycle on 64 cores of a 5GZ CPU (which is obviously impossible due to the single-threadedness of nodeJS)
+    // in other words - don't worry about it unless there is a quantum leap in technology.
+    const random8Chars = () => Math.floor(Math.random() * 2 ** 32).toString(16).padStart(8, '0'); // eslint-disable-line sonarjs/pseudo-random -- I am confident that it's safe to use pseudo random numbers here
+    const randomPropName = `___gfl_${random8Chars()}${random8Chars()}${random8Chars()}${random8Chars()}`;
     if (randomPropName in globalThis) {
         // that was unlucky
         return getRandomPropName();
-        // yes, I know this is inefficient but the alternative necessitates the use of let instead of const, which I don't like and tbh "unlucky" is an understatement...
+        // yes, I know this is inefficient but the alternative necessitates the use of let instead of const, which I don't like. And tbh "unlucky" is an understatement...
     }
     return randomPropName;
 }
-
